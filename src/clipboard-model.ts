@@ -53,13 +53,7 @@ export function deriveTinycastHost(
 
   return {
     bundleId,
-    databasePath: join(
-      home,
-      "Library",
-      "Caches",
-      bundleId,
-      "clipboard.sqlite3",
-    ),
+    databasePath: join(appSupport, bundleId, "clipboard.sqlite3"),
   };
 }
 

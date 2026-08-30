@@ -11,7 +11,7 @@ import {
 
 const home = "/Users/viko";
 
-test("derives stable, beta, dev, and future channel database paths", () => {
+test("derives database paths for Tinycast's current storage layout", () => {
   for (const bundleId of [
     "com.tinycast.app",
     "com.tinycast.app.beta",
@@ -25,7 +25,7 @@ test("derives stable, beta, dev, and future channel database paths", () => {
       ),
       {
         bundleId,
-        databasePath: `${home}/Library/Caches/${bundleId}/clipboard.sqlite3`,
+        databasePath: `${home}/Library/Application Support/${bundleId}/clipboard.sqlite3`,
       },
     );
   }
