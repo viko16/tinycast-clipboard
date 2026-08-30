@@ -20,40 +20,19 @@ interface ViewError {
   description: string;
 }
 
+interface InitialWindow {
+  items: ClipboardItem[];
+  error: ViewError | null;
+}
+
 export default function ClipboardHistory() {
   const host = useMemo(() => getHost(), []);
-  const [windowItems, setWindowItems] = useState<ClipboardItem[]>([]);
-  const [items, setItems] = useState<ClipboardItem[]>([]);
+  const [initialWindow] = useState(() => loadInitialWindow(host));
+  const windowItems = initialWindow.items;
+  const [items, setItems] = useState<ClipboardItem[]>(initialWindow.items);
   const [searchText, setSearchText] = useState("");
-  const [isLoading, setIsLoading] = useState(
-    host instanceof Error ? false : true,
-  );
-  const [error, setError] = useState<ViewError | null>(
-    host instanceof Error ? hostToViewError(host) : null,
-  );
-
-  useEffect(() => {
-    if (host instanceof Error) return;
-    let cancelled = false;
-
-    void loadClipboardWindow(host.databasePath)
-      .then((loaded) => {
-        if (cancelled) return;
-        setWindowItems(loaded);
-        setItems(filterWindow(loaded, searchText));
-        setError(null);
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) setError(databaseToViewError(cause, host));
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [host]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<ViewError | null>(initialWindow.error);
 
   useEffect(() => {
     if (host instanceof Error || windowItems.length === 0) return;
@@ -182,6 +161,18 @@ function getHost(): TinycastHost | Error {
     return error instanceof Error
       ? error
       : new Error("This extension is designed for Tinycast.");
+  }
+}
+
+function loadInitialWindow(host: TinycastHost | Error): InitialWindow {
+  if (host instanceof Error) {
+    return { items: [], error: hostToViewError(host) };
+  }
+
+  try {
+    return { items: loadClipboardWindow(host.databasePath), error: null };
+  } catch (cause: unknown) {
+    return { items: [], error: databaseToViewError(cause, host) };
   }
 }
 

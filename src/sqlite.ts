@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import {
@@ -8,17 +8,10 @@ import {
 } from "./clipboard-model";
 
 const SQLITE = "/usr/bin/sqlite3";
-const REQUIRED_COLUMNS = [
-  "id",
-  "kind",
-  "text",
-  "image_path",
-  "created_at",
-  "source_app",
-  "pinned_at",
-];
 const execFileAsync = promisify(execFile);
 
+// Selecting every consumed field and resolving the inert FTS join makes this query
+// double as the schema check: an incompatible database fails before the first render.
 const WINDOW_QUERY = `
 WITH window_floor AS (
   SELECT COALESCE((
@@ -28,32 +21,30 @@ WITH window_floor AS (
     ORDER BY rowid DESC
     LIMIT 1 OFFSET 999
   ), 0) AS floor
-)
-SELECT rid AS row_id, id, kind, text, image_path, created_at, source_app, pinned_at
-FROM (
+), window_items AS (
   SELECT rowid AS rid, * FROM items WHERE rowid >= (SELECT floor FROM window_floor)
   UNION ALL
   SELECT rowid AS rid, * FROM items
   WHERE pinned_at IS NOT NULL AND rowid < (SELECT floor FROM window_floor)
 )
-ORDER BY rid DESC;
+SELECT w.rid AS row_id, w.id, w.kind, w.text, w.image_path, w.created_at, w.source_app, w.pinned_at
+FROM window_items AS w
+LEFT JOIN (SELECT rowid FROM items_fts LIMIT 1) AS fts_check ON 0
+ORDER BY w.rid DESC;
 `;
 
 export class DatabaseNotFoundError extends Error {}
 export class IncompatibleDatabaseError extends Error {}
 
-export async function loadClipboardWindow(
-  databasePath: string,
-): Promise<ClipboardItem[]> {
+export function loadClipboardWindow(databasePath: string): ClipboardItem[] {
   if (!existsSync(databasePath)) {
     throw new DatabaseNotFoundError(
       `Tinycast clipboard history database was not found.\n${databasePath}`,
     );
   }
 
-  await validateSchema(databasePath);
   return orderClipboardItems(
-    parseClipboardRows(await queryJson(databasePath, WINDOW_QUERY)),
+    parseClipboardRows(queryJsonSync(databasePath, WINDOW_QUERY)),
   );
 }
 
@@ -85,24 +76,23 @@ LIMIT 200;
   return orderClipboardItems([...matchingPins, ...matches]);
 }
 
-async function validateSchema(databasePath: string): Promise<void> {
-  const columns = await queryJson(databasePath, "PRAGMA table_info(items);");
-  if (!Array.isArray(columns))
-    throw new IncompatibleDatabaseError("Invalid items table metadata.");
-  const names = new Set(
-    columns.flatMap((column) =>
-      isRecord(column) && typeof column.name === "string" ? [column.name] : [],
-    ),
-  );
-  const missing = REQUIRED_COLUMNS.filter((column) => !names.has(column));
-
-  const ftsRows = await queryJson(
-    databasePath,
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'items_fts' LIMIT 1;",
-  );
-  if (missing.length > 0 || !Array.isArray(ftsRows) || ftsRows.length !== 1) {
+function queryJsonSync(databasePath: string, sql: string): unknown {
+  try {
+    const stdout = execFileSync(
+      SQLITE,
+      ["-readonly", "-json", "-cmd", ".timeout 250", databasePath, sql],
+      { encoding: "utf8", timeout: 2_000, maxBuffer: 5 * 1024 * 1024 },
+    );
+    const trimmed = stdout.trim();
+    return trimmed ? JSON.parse(trimmed) : [];
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new IncompatibleDatabaseError(
+        "Tinycast returned malformed SQLite JSON.",
+      );
+    }
     throw new IncompatibleDatabaseError(
-      "The Tinycast clipboard database schema is incompatible with this extension.",
+      "Unable to read the Tinycast clipboard database in read-only mode.",
     );
   }
 }
