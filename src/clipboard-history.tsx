@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   imageDetailMarkdown,
   MAX_INLINE_IMAGE_BYTES,
+  MAX_TOTAL_INLINE_IMAGE_BYTES,
   textDetailMarkdown,
 } from "./clipboard-detail";
 import {
@@ -32,9 +33,7 @@ interface InitialWindow {
 }
 
 type ImagePreview =
-  | { itemId: string; status: "loading" }
-  | { itemId: string; status: "ready"; markdown: string }
-  | { itemId: string; status: "error"; message: string };
+  { status: "ready"; markdown: string } | { status: "error"; message: string };
 
 export default function ClipboardHistory() {
   const host = useMemo(() => getHost(), []);
@@ -44,15 +43,9 @@ export default function ClipboardHistory() {
   const [searchText, setSearchText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<ViewError | null>(initialWindow.error);
-  const [selectedItemId, setSelectedItemId] = useState<string | null>(
-    initialWindow.items[0]?.id ?? null,
-  );
-  const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null);
-
-  const selectedItem = useMemo(
-    () => items.find((item) => item.id === selectedItemId) ?? null,
-    [items, selectedItemId],
-  );
+  const [imagePreviews, setImagePreviews] = useState<
+    Record<string, ImagePreview>
+  >({});
 
   useEffect(() => {
     if (host instanceof Error || windowItems.length === 0) return;
@@ -90,62 +83,47 @@ export default function ClipboardHistory() {
   }, [host, searchText, windowItems]);
 
   useEffect(() => {
-    if (selectedItem !== null || items.length === 0) {
-      if (items.length === 0 && selectedItemId !== null) {
-        setSelectedItemId(null);
-      }
-      return;
-    }
-    setSelectedItemId(items[0].id);
-  }, [items, selectedItem, selectedItemId]);
-
-  useEffect(() => {
-    if (
-      selectedItem?.kind !== "image" ||
-      !selectedItem.imagePath ||
-      !existsSync(selectedItem.imagePath)
-    ) {
-      setImagePreview(null);
-      return;
-    }
-
     let cancelled = false;
-    const itemId = selectedItem.id;
-    const imagePath = selectedItem.imagePath;
-    setImagePreview({ itemId, status: "loading" });
+    let loadedBytes = 0;
 
-    void loadImagePreview(imagePath)
-      .then((markdown) => {
-        if (!cancelled) {
-          setImagePreview({ itemId, status: "ready", markdown });
+    void (async () => {
+      for (const item of windowItems) {
+        if (cancelled) return;
+        if (
+          item.kind !== "image" ||
+          !item.imagePath ||
+          !existsSync(item.imagePath)
+        ) {
+          continue;
         }
-      })
-      .catch((cause: unknown) => {
-        if (!cancelled) {
-          setImagePreview({
-            itemId,
-            status: "error",
-            message:
-              cause instanceof ImagePreviewTooLargeError
-                ? "This image is too large to preview. Press Return to copy it."
-                : "This image could not be previewed. Press Return to copy it.",
-          });
+
+        const preview = await loadImagePreview(item.imagePath, loadedBytes);
+        if (cancelled) return;
+        if (preview.status === "ready") {
+          loadedBytes += preview.bytes;
+          setImagePreviews((current) => ({
+            ...current,
+            [item.id]: { status: "ready", markdown: preview.markdown },
+          }));
+        } else {
+          setImagePreviews((current) => ({
+            ...current,
+            [item.id]: { status: "error", message: preview.message },
+          }));
         }
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [selectedItem]);
+  }, [windowItems]);
 
   return (
     <List
       filtering={false}
       isShowingDetail
       isLoading={isLoading}
-      onSelectionChange={(itemId) => {
-        if (itemId !== null) setSelectedItemId(itemId);
-      }}
       onSearchTextChange={setSearchText}
       searchBarPlaceholder="Search Tinycast Clipboard History"
       throttle
@@ -175,8 +153,7 @@ export default function ClipboardHistory() {
           <ClipboardListItem
             key={item.id}
             item={item}
-            imagePreview={imagePreview}
-            isSelected={item.id === selectedItemId}
+            imagePreview={imagePreviews[item.id]}
           />
         ))
       )}
@@ -187,11 +164,9 @@ export default function ClipboardHistory() {
 function ClipboardListItem({
   item,
   imagePreview,
-  isSelected,
 }: {
   item: ClipboardItem;
-  imagePreview: ImagePreview | null;
-  isSelected: boolean;
+  imagePreview: ImagePreview | undefined;
 }) {
   const imageExists =
     item.kind === "image" && !!item.imagePath && existsSync(item.imagePath);
@@ -226,11 +201,7 @@ function ClipboardListItem({
             ? Icon.Image
             : Icon.Text
       }
-      detail={
-        isSelected ? (
-          <ClipboardItemDetail item={item} imagePreview={imagePreview} />
-        ) : undefined
-      }
+      detail={<ClipboardItemDetail item={item} imagePreview={imagePreview} />}
       accessories={accessories}
       actions={
         content !== null ? (
@@ -252,7 +223,7 @@ function ClipboardItemDetail({
   imagePreview,
 }: {
   item: ClipboardItem;
-  imagePreview: ImagePreview | null;
+  imagePreview: ImagePreview | undefined;
 }) {
   const imageExists =
     item.kind === "image" && !!item.imagePath && existsSync(item.imagePath);
@@ -263,10 +234,8 @@ function ClipboardItemDetail({
     markdown = textDetailMarkdown(item.text ?? "");
   } else if (!imageExists) {
     markdown = "Image file is missing.";
-  } else if (imagePreview?.itemId === item.id) {
-    if (imagePreview.status === "loading") {
-      isLoading = true;
-    } else if (imagePreview.status === "ready") {
+  } else if (imagePreview) {
+    if (imagePreview.status === "ready") {
       markdown = imagePreview.markdown;
     } else {
       markdown = imagePreview.message;
@@ -304,14 +273,40 @@ function ClipboardItemDetail({
   );
 }
 
-class ImagePreviewTooLargeError extends Error {}
+type LoadedImagePreview =
+  | { status: "ready"; markdown: string; bytes: number }
+  | { status: "error"; message: string };
 
-async function loadImagePreview(imagePath: string): Promise<string> {
-  const metadata = await stat(imagePath);
-  if (metadata.size > MAX_INLINE_IMAGE_BYTES) {
-    throw new ImagePreviewTooLargeError();
+async function loadImagePreview(
+  imagePath: string,
+  loadedBytes: number,
+): Promise<LoadedImagePreview> {
+  try {
+    const metadata = await stat(imagePath);
+    if (metadata.size > MAX_INLINE_IMAGE_BYTES) {
+      return {
+        status: "error",
+        message: "This image is too large to preview. Press Return to copy it.",
+      };
+    }
+    if (loadedBytes + metadata.size > MAX_TOTAL_INLINE_IMAGE_BYTES) {
+      return {
+        status: "error",
+        message:
+          "This preview was skipped to keep the extension responsive. Press Return to copy it.",
+      };
+    }
+    return {
+      status: "ready",
+      markdown: imageDetailMarkdown(imagePath, await readFile(imagePath)),
+      bytes: metadata.size,
+    };
+  } catch {
+    return {
+      status: "error",
+      message: "This image could not be previewed. Press Return to copy it.",
+    };
   }
-  return imageDetailMarkdown(imagePath, await readFile(imagePath));
 }
 
 function getHost(): TinycastHost | Error {

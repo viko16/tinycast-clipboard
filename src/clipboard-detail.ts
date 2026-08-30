@@ -1,6 +1,7 @@
 import { extname } from "node:path";
 
 export const MAX_INLINE_IMAGE_BYTES = 12 * 1024 * 1024;
+export const MAX_TOTAL_INLINE_IMAGE_BYTES = 48 * 1024 * 1024;
 
 export function textDetailMarkdown(text: string): string {
   return text
