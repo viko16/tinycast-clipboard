@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import {
+  imageDetailMarkdown,
+  textDetailMarkdown,
+} from "../src/clipboard-detail.ts";
 import type { ClipboardItem } from "../src/clipboard-model.ts";
 import {
   deriveTinycastHost,
@@ -117,4 +121,18 @@ test("orders pins oldest-pin-first and normal history newest-row-first", () => {
 test("summarizes multiline and long text", () => {
   assert.equal(summarizeText(" first\n\nsecond\tthird "), "first second third");
   assert.equal(summarizeText("abcdef", 5), "abcd…");
+});
+
+test("preserves full text while neutralizing Tinycast markdown blocks", () => {
+  assert.equal(
+    textDetailMarkdown("# heading\n- item\n**bold**"),
+    "\\# heading\u2028\\- item\u2028\\*\\*bold\\*\\*",
+  );
+});
+
+test("creates inline image markdown with a matching MIME type", () => {
+  assert.equal(
+    imageDetailMarkdown("/tmp/image.jpg", Buffer.from("image")),
+    "![Clipboard image](data:image/jpeg;base64,aW1hZ2U=)",
+  );
 });
