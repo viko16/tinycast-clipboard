@@ -1,7 +1,13 @@
 import { Action, ActionPanel, environment, Icon, List } from "@raycast/api";
 import { existsSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 import { useEffect, useMemo, useState } from "react";
+import {
+  imageDetailMarkdown,
+  MAX_INLINE_IMAGE_BYTES,
+  textDetailMarkdown,
+} from "./clipboard-detail";
 import {
   ClipboardItem,
   deriveTinycastHost,
@@ -25,6 +31,11 @@ interface InitialWindow {
   error: ViewError | null;
 }
 
+type ImagePreview =
+  | { itemId: string; status: "loading" }
+  | { itemId: string; status: "ready"; markdown: string }
+  | { itemId: string; status: "error"; message: string };
+
 export default function ClipboardHistory() {
   const host = useMemo(() => getHost(), []);
   const [initialWindow] = useState(() => loadInitialWindow(host));
@@ -33,6 +44,15 @@ export default function ClipboardHistory() {
   const [searchText, setSearchText] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<ViewError | null>(initialWindow.error);
+  const [selectedItemId, setSelectedItemId] = useState<string | null>(
+    initialWindow.items[0]?.id ?? null,
+  );
+  const [imagePreview, setImagePreview] = useState<ImagePreview | null>(null);
+
+  const selectedItem = useMemo(
+    () => items.find((item) => item.id === selectedItemId) ?? null,
+    [items, selectedItemId],
+  );
 
   useEffect(() => {
     if (host instanceof Error || windowItems.length === 0) return;
@@ -69,10 +89,63 @@ export default function ClipboardHistory() {
     };
   }, [host, searchText, windowItems]);
 
+  useEffect(() => {
+    if (selectedItem !== null || items.length === 0) {
+      if (items.length === 0 && selectedItemId !== null) {
+        setSelectedItemId(null);
+      }
+      return;
+    }
+    setSelectedItemId(items[0].id);
+  }, [items, selectedItem, selectedItemId]);
+
+  useEffect(() => {
+    if (
+      selectedItem?.kind !== "image" ||
+      !selectedItem.imagePath ||
+      !existsSync(selectedItem.imagePath)
+    ) {
+      setImagePreview(null);
+      return;
+    }
+
+    let cancelled = false;
+    const itemId = selectedItem.id;
+    const imagePath = selectedItem.imagePath;
+    setImagePreview({ itemId, status: "loading" });
+
+    void loadImagePreview(imagePath)
+      .then((markdown) => {
+        if (!cancelled) {
+          setImagePreview({ itemId, status: "ready", markdown });
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setImagePreview({
+            itemId,
+            status: "error",
+            message:
+              cause instanceof ImagePreviewTooLargeError
+                ? "This image is too large to preview. Press Return to copy it."
+                : "This image could not be previewed. Press Return to copy it.",
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedItem]);
+
   return (
     <List
       filtering={false}
+      isShowingDetail
       isLoading={isLoading}
+      onSelectionChange={(itemId) => {
+        if (itemId !== null) setSelectedItemId(itemId);
+      }}
       onSearchTextChange={setSearchText}
       searchBarPlaceholder="Search Tinycast Clipboard History"
       throttle
@@ -98,13 +171,28 @@ export default function ClipboardHistory() {
           }
         />
       ) : (
-        items.map((item) => <ClipboardListItem key={item.id} item={item} />)
+        items.map((item) => (
+          <ClipboardListItem
+            key={item.id}
+            item={item}
+            imagePreview={imagePreview}
+            isSelected={item.id === selectedItemId}
+          />
+        ))
       )}
     </List>
   );
 }
 
-function ClipboardListItem({ item }: { item: ClipboardItem }) {
+function ClipboardListItem({
+  item,
+  imagePreview,
+  isSelected,
+}: {
+  item: ClipboardItem;
+  imagePreview: ImagePreview | null;
+  isSelected: boolean;
+}) {
   const imageExists =
     item.kind === "image" && !!item.imagePath && existsSync(item.imagePath);
   const content =
@@ -138,6 +226,11 @@ function ClipboardListItem({ item }: { item: ClipboardItem }) {
             ? Icon.Image
             : Icon.Text
       }
+      detail={
+        isSelected ? (
+          <ClipboardItemDetail item={item} imagePreview={imagePreview} />
+        ) : undefined
+      }
       accessories={accessories}
       actions={
         content !== null ? (
@@ -152,6 +245,73 @@ function ClipboardListItem({ item }: { item: ClipboardItem }) {
       }
     />
   );
+}
+
+function ClipboardItemDetail({
+  item,
+  imagePreview,
+}: {
+  item: ClipboardItem;
+  imagePreview: ImagePreview | null;
+}) {
+  const imageExists =
+    item.kind === "image" && !!item.imagePath && existsSync(item.imagePath);
+  let markdown: string | undefined;
+  let isLoading = false;
+
+  if (item.kind === "text") {
+    markdown = textDetailMarkdown(item.text ?? "");
+  } else if (!imageExists) {
+    markdown = "Image file is missing.";
+  } else if (imagePreview?.itemId === item.id) {
+    if (imagePreview.status === "loading") {
+      isLoading = true;
+    } else if (imagePreview.status === "ready") {
+      markdown = imagePreview.markdown;
+    } else {
+      markdown = imagePreview.message;
+    }
+  } else {
+    isLoading = true;
+  }
+
+  return (
+    <List.Item.Detail
+      isLoading={isLoading}
+      markdown={markdown}
+      metadata={
+        <List.Item.Detail.Metadata>
+          {item.sourceApp ? (
+            <List.Item.Detail.Metadata.Label
+              title="Source"
+              text={item.sourceApp}
+            />
+          ) : null}
+          <List.Item.Detail.Metadata.Label
+            title="Type"
+            text={item.kind === "image" ? "Image" : "Text"}
+          />
+          <List.Item.Detail.Metadata.Label
+            title="Copied"
+            text={formatCopiedAt(item.createdAt)}
+          />
+          {item.pinnedAt !== null ? (
+            <List.Item.Detail.Metadata.Label title="Pinned" text="Yes" />
+          ) : null}
+        </List.Item.Detail.Metadata>
+      }
+    />
+  );
+}
+
+class ImagePreviewTooLargeError extends Error {}
+
+async function loadImagePreview(imagePath: string): Promise<string> {
+  const metadata = await stat(imagePath);
+  if (metadata.size > MAX_INLINE_IMAGE_BYTES) {
+    throw new ImagePreviewTooLargeError();
+  }
+  return imageDetailMarkdown(imagePath, await readFile(imagePath));
 }
 
 function getHost(): TinycastHost | Error {
@@ -206,5 +366,12 @@ function formatRelativeTime(timestamp: number): string {
   return new Intl.DateTimeFormat("en", {
     month: "short",
     day: "numeric",
+  }).format(new Date(timestamp * 1_000));
+}
+
+function formatCopiedAt(timestamp: number): string {
+  return new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeStyle: "medium",
   }).format(new Date(timestamp * 1_000));
 }
